@@ -1,5 +1,4 @@
-import fs from 'node:fs';
-import path from 'node:path';
+import { and, asc, count, desc, eq, sql } from 'drizzle-orm';
 import bcrypt from 'bcryptjs';
 import type {
   Appointment,
@@ -9,6 +8,8 @@ import type {
   PublicUser,
   UserRole,
 } from '../src/types/telehealth.ts';
+import { db } from '../db/index.ts';
+import { appointments, doctors, payments, users } from '../db/schema.ts';
 
 export interface StoredUser extends PublicUser {
   passwordHash: string;
@@ -20,9 +21,6 @@ export interface ClinicDatabase {
   appointments: Appointment[];
   payments: PaymentRecord[];
 }
-
-const DATA_DIR = path.resolve(process.cwd(), 'data');
-const DB_FILE = path.join(DATA_DIR, 'clinic-db.json');
 
 function formatTodayDate(): string {
   const now = new Date();
@@ -271,79 +269,157 @@ function createInitialSeed(): ClinicDatabase {
   };
 }
 
+type UserRow = typeof users.$inferSelect;
+type DoctorRow = typeof doctors.$inferSelect;
+type AppointmentRow = typeof appointments.$inferSelect;
+type PaymentRow = typeof payments.$inferSelect;
+
+function iso(value: string): string {
+  const d = new Date(value);
+  return Number.isNaN(d.getTime()) ? value : d.toISOString();
+}
+
+function toStoredUser(row: UserRow): StoredUser {
+  return {
+    id: row.id,
+    name: row.name,
+    email: row.email,
+    role: row.role as UserRole,
+    phone: row.phone ?? undefined,
+    passwordHash: row.passwordHash,
+    createdAt: iso(row.createdAt),
+  };
+}
+
+function toDoctor(row: DoctorRow): DoctorProfile {
+  return {
+    id: row.id,
+    userId: row.userId,
+    name: row.name,
+    email: row.email,
+    specialty: row.specialty,
+    licenseNumber: row.licenseNumber,
+    consultationFee: row.consultationFee,
+    experienceYears: row.experienceYears,
+    languages: row.languages,
+    clinicLocation: row.clinicLocation,
+    bio: row.bio,
+    availableSlots: row.availableSlots,
+    avatarKey: row.avatarKey as AvatarKey,
+    isActive: row.isActive,
+    createdAt: iso(row.createdAt),
+  };
+}
+
+function toPayment(row: PaymentRow): PaymentRecord {
+  return {
+    id: row.id,
+    appointmentId: row.appointmentId,
+    patientId: row.patientId,
+    amount: row.amount,
+    currency: row.currency,
+    method: row.method as PaymentRecord['method'],
+    last4: row.last4 ?? undefined,
+    transactionRef: row.transactionRef,
+    paidAt: iso(row.paidAt),
+  };
+}
+
+function toAppointment(row: AppointmentRow, payment?: PaymentRow | null): Appointment {
+  return {
+    id: row.id,
+    patientId: row.patientId,
+    patientName: row.patientName,
+    patientEmail: row.patientEmail,
+    doctorId: row.doctorId,
+    doctorUserId: row.doctorUserId,
+    doctorName: row.doctorName,
+    doctorSpecialty: row.doctorSpecialty,
+    scheduledDate: row.scheduledDate,
+    scheduledTime: row.scheduledTime,
+    scheduledIso: row.scheduledIso,
+    reason: row.reason,
+    feeAmount: row.feeAmount,
+    paymentStatus: row.paymentStatus as Appointment['paymentStatus'],
+    status: row.status as Appointment['status'],
+    payment: payment ? toPayment(payment) : undefined,
+    clinicalNotes: row.clinicalNotes ?? undefined,
+    prescription: row.prescription ?? undefined,
+    createdAt: iso(row.createdAt),
+    updatedAt: iso(row.updatedAt),
+  };
+}
+
+let seedPromise: Promise<void> | null = null;
+
+/** Seeds the demo accounts, doctors and appointments the first time the database is empty. */
+async function ensureSeeded(): Promise<void> {
+  if (!seedPromise) {
+    seedPromise = (async () => {
+      const [{ value }] = await db.select({ value: count() }).from(users);
+      if (value > 0) return;
+      const seed = createInitialSeed();
+      await db.insert(users).values(seed.users).onConflictDoNothing();
+      await db.insert(doctors).values(seed.doctors).onConflictDoNothing();
+      await db
+        .insert(appointments)
+        .values(seed.appointments.map(({ payment: _p, ...rest }) => rest))
+        .onConflictDoNothing();
+      await db.insert(payments).values(seed.payments).onConflictDoNothing();
+    })().catch((err) => {
+      seedPromise = null;
+      throw err;
+    });
+  }
+  return seedPromise;
+}
+
 class ClinicStore {
-  private db: ClinicDatabase;
-
-  constructor() {
-    this.db = this.load();
-  }
-
-  private load(): ClinicDatabase {
-    try {
-      if (!fs.existsSync(DATA_DIR)) {
-        fs.mkdirSync(DATA_DIR, { recursive: true });
-      }
-      if (fs.existsSync(DB_FILE)) {
-        const raw = fs.readFileSync(DB_FILE, 'utf-8');
-        const parsed = JSON.parse(raw) as ClinicDatabase;
-        if (parsed && Array.isArray(parsed.users) && Array.isArray(parsed.doctors)) {
-          return parsed;
-        }
-      }
-    } catch (err) {
-      console.warn('Initializing fresh clinic database:', err);
-    }
-    const seed = createInitialSeed();
-    this.persist(seed);
-    return seed;
-  }
-
-  private persist(nextDb: ClinicDatabase = this.db): void {
-    if (!fs.existsSync(DATA_DIR)) {
-      fs.mkdirSync(DATA_DIR, { recursive: true });
-    }
-    const tmpFile = `${DB_FILE}.tmp`;
-    fs.writeFileSync(tmpFile, JSON.stringify(nextDb, null, 2), 'utf-8');
-    fs.renameSync(tmpFile, DB_FILE);
-  }
-
   public toPublicUser(user: StoredUser): PublicUser {
     const { passwordHash: _ignored, ...rest } = user;
     return rest;
   }
 
-  public findUserByEmail(email: string): StoredUser | undefined {
+  public async findUserByEmail(email: string): Promise<StoredUser | undefined> {
+    await ensureSeeded();
     const normalized = email.trim().toLowerCase();
-    return this.db.users.find((u) => u.email.toLowerCase() === normalized);
+    const [row] = await db
+      .select()
+      .from(users)
+      .where(eq(sql`lower(${users.email})`, normalized))
+      .limit(1);
+    return row ? toStoredUser(row) : undefined;
   }
 
-  public findUserById(id: string): StoredUser | undefined {
-    return this.db.users.find((u) => u.id === id);
+  public async findUserById(id: string): Promise<StoredUser | undefined> {
+    await ensureSeeded();
+    const [row] = await db.select().from(users).where(eq(users.id, id)).limit(1);
+    return row ? toStoredUser(row) : undefined;
   }
 
-  public createPatientUser(input: {
+  public async createPatientUser(input: {
     name: string;
     email: string;
     password: string;
     phone?: string;
-  }): PublicUser {
-    const id = `usr_pat_${Date.now().toString(36)}`;
-    const nowIso = new Date().toISOString();
-    const user: StoredUser = {
-      id,
-      name: input.name.trim(),
-      email: input.email.trim().toLowerCase(),
-      role: 'patient',
-      phone: input.phone?.trim(),
-      passwordHash: bcrypt.hashSync(input.password, 8),
-      createdAt: nowIso,
-    };
-    this.db.users.push(user);
-    this.persist();
-    return this.toPublicUser(user);
+  }): Promise<PublicUser> {
+    await ensureSeeded();
+    const [row] = await db
+      .insert(users)
+      .values({
+        id: `usr_pat_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 5)}`,
+        name: input.name.trim(),
+        email: input.email.trim().toLowerCase(),
+        role: 'patient',
+        phone: input.phone?.trim() || null,
+        passwordHash: bcrypt.hashSync(input.password, 8),
+        createdAt: new Date().toISOString(),
+      })
+      .returning();
+    return this.toPublicUser(toStoredUser(row));
   }
 
-  public registerDoctor(input: {
+  public async registerDoctor(input: {
     name: string;
     email: string;
     password: string;
@@ -357,187 +433,224 @@ class ClinicStore {
     bio: string;
     availableSlots: string[];
     avatarKey?: AvatarKey;
-  }): DoctorProfile {
+  }): Promise<DoctorProfile> {
+    await ensureSeeded();
     const nowIso = new Date().toISOString();
-    const userId = `usr_doc_${Date.now().toString(36)}`;
-    const doctorId = `doc_${Date.now().toString(36)}`;
+    const suffix = `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 5)}`;
+    const userId = `usr_doc_${suffix}`;
+    const email = input.email.trim().toLowerCase();
 
-    const user: StoredUser = {
-      id: userId,
-      name: input.name.trim(),
-      email: input.email.trim().toLowerCase(),
-      role: 'doctor',
-      phone: input.phone?.trim(),
-      passwordHash: bcrypt.hashSync(input.password, 8),
-      createdAt: nowIso,
-    };
-
-    const doctor: DoctorProfile = {
-      id: doctorId,
-      userId,
-      name: input.name.trim(),
-      email: input.email.trim().toLowerCase(),
-      specialty: input.specialty.trim(),
-      licenseNumber: input.licenseNumber.trim(),
-      consultationFee: Number(input.consultationFee),
-      experienceYears: Number(input.experienceYears),
-      languages: input.languages.length > 0 ? input.languages : ['English'],
-      clinicLocation: input.clinicLocation.trim() || 'MedLink Virtual Clinic',
-      bio: input.bio.trim(),
-      availableSlots:
-        input.availableSlots.length > 0
-          ? input.availableSlots
-          : ['09:30', '11:00', '14:00', '16:00'],
-      avatarKey: input.avatarKey ?? 'default',
-      isActive: true,
-      createdAt: nowIso,
-    };
-
-    this.db.users.push(user);
-    this.db.doctors.unshift(doctor);
-    this.persist();
-    return doctor;
+    return db.transaction(async (tx) => {
+      await tx.insert(users).values({
+        id: userId,
+        name: input.name.trim(),
+        email,
+        role: 'doctor',
+        phone: input.phone?.trim() || null,
+        passwordHash: bcrypt.hashSync(input.password, 8),
+        createdAt: nowIso,
+      });
+      const [row] = await tx
+        .insert(doctors)
+        .values({
+          id: `doc_${suffix}`,
+          userId,
+          name: input.name.trim(),
+          email,
+          specialty: input.specialty.trim(),
+          licenseNumber: input.licenseNumber.trim(),
+          consultationFee: Math.round(Number(input.consultationFee)),
+          experienceYears: Math.round(Number(input.experienceYears)),
+          languages: input.languages.length > 0 ? input.languages : ['English'],
+          clinicLocation: input.clinicLocation.trim() || 'MedLink Virtual Clinic',
+          bio: input.bio.trim(),
+          availableSlots:
+            input.availableSlots.length > 0
+              ? input.availableSlots
+              : ['09:30', '11:00', '14:00', '16:00'],
+          avatarKey: input.avatarKey ?? 'default',
+          isActive: true,
+          createdAt: nowIso,
+        })
+        .returning();
+      return toDoctor(row);
+    });
   }
 
-  public listDoctors(includeInactive = false): DoctorProfile[] {
-    if (includeInactive) return [...this.db.doctors];
-    return this.db.doctors.filter((d) => d.isActive);
+  public async listDoctors(includeInactive = false): Promise<DoctorProfile[]> {
+    await ensureSeeded();
+    const rows = await db
+      .select()
+      .from(doctors)
+      .where(includeInactive ? undefined : eq(doctors.isActive, true))
+      .orderBy(desc(doctors.createdAt), asc(doctors.id));
+    return rows.map(toDoctor);
   }
 
-  public findDoctorById(doctorId: string): DoctorProfile | undefined {
-    return this.db.doctors.find((d) => d.id === doctorId);
+  public async findDoctorById(doctorId: string): Promise<DoctorProfile | undefined> {
+    await ensureSeeded();
+    const [row] = await db.select().from(doctors).where(eq(doctors.id, doctorId)).limit(1);
+    return row ? toDoctor(row) : undefined;
   }
 
-  public updateDoctor(
+  public async updateDoctor(
     doctorId: string,
     patch: Partial<Pick<DoctorProfile, 'consultationFee' | 'isActive' | 'availableSlots'>>
-  ): DoctorProfile | undefined {
-    const doc = this.db.doctors.find((d) => d.id === doctorId);
-    if (!doc) return undefined;
+  ): Promise<DoctorProfile | undefined> {
+    await ensureSeeded();
+    const changes: Partial<typeof doctors.$inferInsert> = {};
     if (typeof patch.consultationFee === 'number' && patch.consultationFee > 0) {
-      doc.consultationFee = patch.consultationFee;
+      changes.consultationFee = Math.round(patch.consultationFee);
     }
     if (typeof patch.isActive === 'boolean') {
-      doc.isActive = patch.isActive;
+      changes.isActive = patch.isActive;
     }
     if (Array.isArray(patch.availableSlots)) {
-      doc.availableSlots = patch.availableSlots;
+      changes.availableSlots = patch.availableSlots;
     }
-    this.persist();
-    return doc;
-  }
-
-  public listAppointmentsForUser(user: { id: string; role: UserRole }): Appointment[] {
-    let items: Appointment[];
-    if (user.role === 'admin') {
-      items = [...this.db.appointments];
-    } else if (user.role === 'doctor') {
-      items = this.db.appointments.filter((a) => a.doctorUserId === user.id);
-    } else {
-      items = this.db.appointments.filter((a) => a.patientId === user.id);
+    if (Object.keys(changes).length === 0) {
+      return this.findDoctorById(doctorId);
     }
-    return items.sort(
-      (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
-    );
+    const [row] = await db.update(doctors).set(changes).where(eq(doctors.id, doctorId)).returning();
+    return row ? toDoctor(row) : undefined;
   }
 
-  public findAppointmentById(id: string): Appointment | undefined {
-    return this.db.appointments.find((a) => a.id === id);
+  public async listAppointmentsForUser(user: { id: string; role: UserRole }): Promise<Appointment[]> {
+    await ensureSeeded();
+    const filter =
+      user.role === 'admin'
+        ? undefined
+        : user.role === 'doctor'
+          ? eq(appointments.doctorUserId, user.id)
+          : eq(appointments.patientId, user.id);
+    const rows = await db
+      .select()
+      .from(appointments)
+      .leftJoin(payments, eq(payments.appointmentId, appointments.id))
+      .where(filter)
+      .orderBy(desc(appointments.createdAt));
+    return rows.map((r) => toAppointment(r.appointments, r.payments));
   }
 
-  public createAppointment(input: {
+  public async findAppointmentById(id: string): Promise<Appointment | undefined> {
+    await ensureSeeded();
+    const [row] = await db
+      .select()
+      .from(appointments)
+      .leftJoin(payments, eq(payments.appointmentId, appointments.id))
+      .where(eq(appointments.id, id))
+      .limit(1);
+    return row ? toAppointment(row.appointments, row.payments) : undefined;
+  }
+
+  public async createAppointment(input: {
     patient: StoredUser;
     doctor: DoctorProfile;
     scheduledDate: string;
     scheduledTime: string;
     reason: string;
-  }): Appointment {
+  }): Promise<Appointment> {
     const nowIso = new Date().toISOString();
-    const appointment: Appointment = {
-      id: `apt_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`,
-      patientId: input.patient.id,
-      patientName: input.patient.name,
-      patientEmail: input.patient.email,
-      doctorId: input.doctor.id,
-      doctorUserId: input.doctor.userId,
-      doctorName: input.doctor.name,
-      doctorSpecialty: input.doctor.specialty,
-      scheduledDate: input.scheduledDate,
-      scheduledTime: input.scheduledTime,
-      scheduledIso: `${input.scheduledDate}T${input.scheduledTime}:00`,
-      reason: input.reason.trim(),
-      feeAmount: input.doctor.consultationFee,
-      paymentStatus: 'unpaid',
-      status: 'pending_payment',
-      createdAt: nowIso,
-      updatedAt: nowIso,
-    };
-    this.db.appointments.unshift(appointment);
-    this.persist();
-    return appointment;
+    const [row] = await db
+      .insert(appointments)
+      .values({
+        id: `apt_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`,
+        patientId: input.patient.id,
+        patientName: input.patient.name,
+        patientEmail: input.patient.email,
+        doctorId: input.doctor.id,
+        doctorUserId: input.doctor.userId,
+        doctorName: input.doctor.name,
+        doctorSpecialty: input.doctor.specialty,
+        scheduledDate: input.scheduledDate,
+        scheduledTime: input.scheduledTime,
+        scheduledIso: `${input.scheduledDate}T${input.scheduledTime}:00`,
+        reason: input.reason.trim(),
+        feeAmount: input.doctor.consultationFee,
+        paymentStatus: 'unpaid',
+        status: 'pending_payment',
+        createdAt: nowIso,
+        updatedAt: nowIso,
+      })
+      .returning();
+    return toAppointment(row);
   }
 
-  public payAppointment(input: {
+  public async payAppointment(input: {
     appointmentId: string;
     patientId: string;
     method: 'card' | 'upi' | 'wallet';
     last4?: string;
-  }): Appointment | undefined {
-    const apt = this.db.appointments.find((a) => a.id === input.appointmentId);
-    if (!apt) return undefined;
-
+  }): Promise<Appointment | undefined> {
     const nowIso = new Date().toISOString();
-    const payment: PaymentRecord = {
-      id: `pay_${Date.now().toString(36)}`,
-      appointmentId: apt.id,
-      patientId: input.patientId,
-      amount: apt.feeAmount,
-      currency: 'USD',
-      method: input.method,
-      last4: input.last4,
-      transactionRef: `TXN-MLK-${Math.floor(100000 + Math.random() * 900000)}`,
-      paidAt: nowIso,
-    };
-
-    apt.paymentStatus = 'paid';
-    apt.status = 'confirmed';
-    apt.payment = payment;
-    apt.updatedAt = nowIso;
-    this.db.payments.unshift(payment);
-    this.persist();
-    return apt;
+    return db.transaction(async (tx) => {
+      const [apt] = await tx
+        .update(appointments)
+        .set({ paymentStatus: 'paid', status: 'confirmed', updatedAt: nowIso })
+        .where(and(eq(appointments.id, input.appointmentId), eq(appointments.paymentStatus, 'unpaid')))
+        .returning();
+      if (!apt) return undefined;
+      const [payment] = await tx
+        .insert(payments)
+        .values({
+          id: `pay_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 5)}`,
+          appointmentId: apt.id,
+          patientId: input.patientId,
+          amount: apt.feeAmount,
+          currency: 'USD',
+          method: input.method,
+          last4: input.last4 ?? null,
+          transactionRef: `TXN-MLK-${Math.floor(100000 + Math.random() * 900000)}`,
+          paidAt: nowIso,
+        })
+        .returning();
+      return toAppointment(apt, payment);
+    });
   }
 
-  public updateAppointmentStatus(input: {
+  public async updateAppointmentStatus(input: {
     appointmentId: string;
     status?: Appointment['status'];
     clinicalNotes?: string;
     prescription?: string;
-  }): Appointment | undefined {
-    const apt = this.db.appointments.find((a) => a.id === input.appointmentId);
-    if (!apt) return undefined;
-    if (input.status) {
-      apt.status = input.status;
-    }
-    if (typeof input.clinicalNotes === 'string') {
-      apt.clinicalNotes = input.clinicalNotes;
-    }
-    if (typeof input.prescription === 'string') {
-      apt.prescription = input.prescription;
-    }
-    apt.updatedAt = new Date().toISOString();
-    this.persist();
-    return apt;
+  }): Promise<Appointment | undefined> {
+    const changes: Partial<typeof appointments.$inferInsert> = {
+      updatedAt: new Date().toISOString(),
+    };
+    if (input.status) changes.status = input.status;
+    if (typeof input.clinicalNotes === 'string') changes.clinicalNotes = input.clinicalNotes;
+    if (typeof input.prescription === 'string') changes.prescription = input.prescription;
+    const [row] = await db
+      .update(appointments)
+      .set(changes)
+      .where(eq(appointments.id, input.appointmentId))
+      .returning({ id: appointments.id });
+    if (!row) return undefined;
+    return this.findAppointmentById(row.id);
   }
 
-  public getAdminStats(liveRoomCount: number) {
-    const paidRevenue = this.db.payments.reduce((sum, p) => sum + p.amount, 0);
+  public async getAdminStats(liveRoomCount: number) {
+    await ensureSeeded();
+    const [doctorStats] = await db
+      .select({
+        total: count(),
+        active: sql<number>`count(*) filter (where ${doctors.isActive})`.mapWith(Number),
+      })
+      .from(doctors);
+    const [patientStats] = await db
+      .select({ total: count() })
+      .from(users)
+      .where(eq(users.role, 'patient'));
+    const [appointmentStats] = await db.select({ total: count() }).from(appointments);
+    const [revenue] = await db
+      .select({ sum: sql<number>`coalesce(sum(${payments.amount}), 0)`.mapWith(Number) })
+      .from(payments);
     return {
-      totalDoctors: this.db.doctors.length,
-      activeDoctors: this.db.doctors.filter((d) => d.isActive).length,
-      totalPatients: this.db.users.filter((u) => u.role === 'patient').length,
-      totalAppointments: this.db.appointments.length,
-      paidRevenue,
+      totalDoctors: doctorStats.total,
+      activeDoctors: doctorStats.active,
+      totalPatients: patientStats.total,
+      totalAppointments: appointmentStats.total,
+      paidRevenue: revenue.sum,
       liveCalls: liveRoomCount,
     };
   }
