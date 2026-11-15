@@ -1,0 +1,6 @@
+{
+  "name": "MedLink Telehealth",
+  "description": "Role-based telehealth mobile and web platform where admins register doctors, doctors manage appointments and join video consultations, and patients book appointments and pay consultation fees, complete with React Native Expo source code and Cloud/Play Store deployment guides.",
+  "requestFramePermissions": ["camera", "microphone"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

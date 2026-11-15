@@ -1,0 +1,85 @@
+{
+  "entities": {
+    "UserPublic": {
+      "title": "UserPublic",
+      "description": "Public clinical profile summary for a user",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "displayName": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "role": { "type": "string", "enum": ["patient", "doctor", "admin"] },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["uid", "displayName", "role", "createdAt"]
+    },
+    "UserPrivate": {
+      "title": "UserPrivate",
+      "description": "Private PII record isolated from public reads",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "email": { "type": "string", "minLength": 3, "maxLength": 180 },
+        "phone": { "type": "string", "minLength": 0, "maxLength": 40 },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["uid", "email", "updatedAt"]
+    },
+    "Doctor": {
+      "title": "Doctor",
+      "description": "Registered specialist physician directory record",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "name": { "type": "string", "minLength": 2, "maxLength": 120 },
+        "specialty": { "type": "string", "minLength": 2, "maxLength": 80 },
+        "licenseNumber": { "type": "string", "minLength": 2, "maxLength": 64 },
+        "consultationFee": { "type": "number" },
+        "clinicLocation": { "type": "string", "minLength": 2, "maxLength": 160 },
+        "isActive": { "type": "boolean" },
+        "createdByUid": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "name", "specialty", "licenseNumber", "consultationFee", "isActive", "createdByUid", "createdAt", "updatedAt"]
+    },
+    "Appointment": {
+      "title": "Appointment",
+      "description": "Patient-Doctor telehealth consultation booking and fee settlement record",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "patientUid": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "doctorId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "doctorName": { "type": "string", "minLength": 2, "maxLength": 120 },
+        "scheduledDate": { "type": "string", "minLength": 8, "maxLength": 20 },
+        "scheduledTime": { "type": "string", "minLength": 4, "maxLength": 16 },
+        "reason": { "type": "string", "minLength": 3, "maxLength": 500 },
+        "feeAmount": { "type": "number" },
+        "paymentStatus": { "type": "string", "enum": ["unpaid", "paid"] },
+        "status": { "type": "string", "enum": ["pending_payment", "confirmed", "in_call", "completed", "cancelled"] },
+        "clinicalNotes": { "type": "string", "minLength": 0, "maxLength": 2000 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "patientUid", "doctorId", "doctorName", "scheduledDate", "scheduledTime", "reason", "feeAmount", "paymentStatus", "status", "createdAt", "updatedAt"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": { "$ref": "#/entities/UserPublic" },
+      "description": "Public user role summary"
+    },
+    "/users/{userId}/private/{docId}": {
+      "schema": { "$ref": "#/entities/UserPrivate" },
+      "description": "Private user PII isolated to owner and admins"
+    },
+    "/doctors/{doctorId}": {
+      "schema": { "$ref": "#/entities/Doctor" },
+      "description": "Clinic physician directory managed by admins"
+    },
+    "/appointments/{appointmentId}": {
+      "schema": { "$ref": "#/entities/Appointment" },
+      "description": "Patient consultation appointments and payment status"
+    }
+  }
+}

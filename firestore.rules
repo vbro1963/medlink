@@ -1,0 +1,177 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Global default-deny safety net
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isVerifiedUser() {
+      return isSignedIn() && request.auth.token.email_verified == true;
+    }
+
+    function isAdmin() {
+      return isVerifiedUser() && (
+        request.auth.token.email == 'srinivas.mtec.uk@gmail.com' ||
+        exists(/databases/$(database)/documents/admins/$(request.auth.uid))
+      );
+    }
+
+    function isValidUserPublic(data) {
+      return data.keys().hasAll(['uid', 'displayName', 'role', 'createdAt']) &&
+        data.keys().hasOnly(['uid', 'displayName', 'role', 'createdAt']) &&
+        isValidId(data.uid) &&
+        data.displayName is string && data.displayName.size() >= 1 && data.displayName.size() <= 120 &&
+        data.role in ['patient', 'doctor', 'admin'] &&
+        data.createdAt is timestamp;
+    }
+
+    function isValidUserPrivate(data) {
+      return data.keys().hasAll(['uid', 'email', 'updatedAt']) &&
+        data.keys().hasOnly(['uid', 'email', 'phone', 'updatedAt']) &&
+        isValidId(data.uid) &&
+        data.email is string && data.email.size() >= 3 && data.email.size() <= 180 &&
+        (!('phone' in data) || (data.phone is string && data.phone.size() <= 40)) &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidDoctor(data) {
+      return data.keys().hasAll(['id', 'name', 'specialty', 'licenseNumber', 'consultationFee', 'isActive', 'createdByUid', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly(['id', 'name', 'specialty', 'licenseNumber', 'consultationFee', 'clinicLocation', 'isActive', 'createdByUid', 'createdAt', 'updatedAt']) &&
+        isValidId(data.id) &&
+        data.name is string && data.name.size() >= 2 && data.name.size() <= 120 &&
+        data.specialty is string && data.specialty.size() >= 2 && data.specialty.size() <= 80 &&
+        data.licenseNumber is string && data.licenseNumber.size() >= 2 && data.licenseNumber.size() <= 64 &&
+        data.consultationFee is number && data.consultationFee > 0 && data.consultationFee <= 10000 &&
+        (!('clinicLocation' in data) || (data.clinicLocation is string && data.clinicLocation.size() <= 160)) &&
+        data.isActive is bool &&
+        isValidId(data.createdByUid) &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidAppointment(data) {
+      return data.keys().hasAll(['id', 'patientUid', 'doctorId', 'doctorName', 'scheduledDate', 'scheduledTime', 'reason', 'feeAmount', 'paymentStatus', 'status', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly(['id', 'patientUid', 'doctorId', 'doctorName', 'scheduledDate', 'scheduledTime', 'reason', 'feeAmount', 'paymentStatus', 'status', 'clinicalNotes', 'createdAt', 'updatedAt']) &&
+        isValidId(data.id) &&
+        isValidId(data.patientUid) &&
+        isValidId(data.doctorId) &&
+        data.doctorName is string && data.doctorName.size() >= 2 && data.doctorName.size() <= 120 &&
+        data.scheduledDate is string && data.scheduledDate.size() >= 8 && data.scheduledDate.size() <= 20 &&
+        data.scheduledTime is string && data.scheduledTime.size() >= 4 && data.scheduledTime.size() <= 16 &&
+        data.reason is string && data.reason.size() >= 3 && data.reason.size() <= 500 &&
+        data.feeAmount is number && data.feeAmount > 0 && data.feeAmount <= 10000 &&
+        data.paymentStatus in ['unpaid', 'paid'] &&
+        data.status in ['pending_payment', 'confirmed', 'in_call', 'completed', 'cancelled'] &&
+        (!('clinicalNotes' in data) || (data.clinicalNotes is string && data.clinicalNotes.size() <= 2000)) &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    match /test/connection {
+      allow get: if true;
+    }
+
+    match /admins/{adminUid} {
+      allow get: if isVerifiedUser() && request.auth.uid == adminUid;
+      allow list, write: if false;
+    }
+
+    match /users/{userId} {
+      allow get: if isValidId(userId) && isVerifiedUser() && (request.auth.uid == userId || isAdmin());
+      allow list: if isAdmin();
+      allow create: if isValidId(userId) && isVerifiedUser() &&
+        isValidUserPublic(incoming()) &&
+        incoming().uid == request.auth.uid &&
+        request.auth.uid == userId &&
+        incoming().createdAt == request.time &&
+        (isAdmin() || incoming().role == 'patient');
+      allow update: if isValidId(userId) && isVerifiedUser() &&
+        isValidUserPublic(incoming()) &&
+        incoming().uid == existing().uid &&
+        incoming().createdAt == existing().createdAt &&
+        (isAdmin() || (request.auth.uid == userId && incoming().diff(existing()).affectedKeys().hasOnly(['displayName'])));
+      allow delete: if false;
+
+      match /private/{docId} {
+        allow get: if isValidId(userId) && isValidId(docId) && isVerifiedUser() && (request.auth.uid == userId || isAdmin());
+        allow list: if isVerifiedUser() && (request.auth.uid == userId || isAdmin());
+        allow create, update: if isValidId(userId) && isValidId(docId) && isVerifiedUser() &&
+          (request.auth.uid == userId || isAdmin()) &&
+          isValidUserPrivate(incoming()) &&
+          incoming().uid == userId &&
+          incoming().updatedAt == request.time;
+        allow delete: if false;
+      }
+    }
+
+    match /doctors/{doctorId} {
+      allow get: if isValidId(doctorId);
+      allow list: if resource.data.isActive == true || isAdmin();
+      allow create: if isValidId(doctorId) && isAdmin() &&
+        isValidDoctor(incoming()) &&
+        incoming().id == doctorId &&
+        incoming().createdByUid == request.auth.uid &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time;
+      allow update: if isValidId(doctorId) && isAdmin() &&
+        isValidDoctor(incoming()) &&
+        incoming().id == existing().id &&
+        incoming().createdByUid == existing().createdByUid &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time &&
+        incoming().diff(existing()).affectedKeys().hasOnly(['consultationFee', 'isActive', 'clinicLocation', 'updatedAt']);
+      allow delete: if false;
+    }
+
+    match /appointments/{appointmentId} {
+      allow get: if isValidId(appointmentId) && isVerifiedUser() &&
+        (existing().patientUid == request.auth.uid || isAdmin());
+      allow list: if isVerifiedUser() && (resource.data.patientUid == request.auth.uid || isAdmin());
+      allow create: if isValidId(appointmentId) && isVerifiedUser() &&
+        isValidAppointment(incoming()) &&
+        incoming().id == appointmentId &&
+        incoming().patientUid == request.auth.uid &&
+        incoming().paymentStatus == 'unpaid' &&
+        incoming().status == 'pending_payment' &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time &&
+        exists(/databases/$(database)/documents/doctors/$(incoming().doctorId));
+      allow update: if isValidId(appointmentId) && isVerifiedUser() &&
+        isValidAppointment(incoming()) &&
+        incoming().id == existing().id &&
+        incoming().patientUid == existing().patientUid &&
+        incoming().doctorId == existing().doctorId &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time &&
+        (
+          isAdmin() ||
+          (
+            existing().status != 'completed' &&
+            existing().patientUid == request.auth.uid &&
+            (
+              (existing().paymentStatus == 'unpaid' && incoming().paymentStatus == 'paid' && incoming().status == 'confirmed' && incoming().diff(existing()).affectedKeys().hasOnly(['paymentStatus', 'status', 'updatedAt'])) ||
+              (incoming().status == 'cancelled' && incoming().diff(existing()).affectedKeys().hasOnly(['status', 'updatedAt']))
+            )
+          )
+        );
+      allow delete: if false;
+    }
+  }
+}
