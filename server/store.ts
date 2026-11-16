@@ -1,4 +1,5 @@
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import bcrypt from 'bcryptjs';
 import type {
@@ -21,7 +22,26 @@ export interface ClinicDatabase {
   payments: PaymentRecord[];
 }
 
-const DATA_DIR = path.resolve(process.cwd(), 'data');
+function resolveDataDir(): string {
+  const configuredDir = process.env.MEDLINK_DATA_DIR;
+  const projectDir = configuredDir
+    ? path.resolve(configuredDir)
+    : path.resolve(process.cwd(), 'data');
+
+  try {
+    fs.mkdirSync(projectDir, { recursive: true });
+    const probeFile = path.join(projectDir, `.write-test-${process.pid}`);
+    fs.writeFileSync(probeFile, '');
+    fs.unlinkSync(probeFile);
+    return projectDir;
+  } catch {
+    const temporaryDir = path.join(os.tmpdir(), 'medlink-data');
+    fs.mkdirSync(temporaryDir, { recursive: true });
+    return temporaryDir;
+  }
+}
+
+const DATA_DIR = resolveDataDir();
 const DB_FILE = path.join(DATA_DIR, 'clinic-db.json');
 
 function formatTodayDate(): string {
